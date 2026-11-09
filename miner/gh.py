@@ -6,6 +6,10 @@ import time
 import urllib.parse
 
 PACE_SECONDS = 0.75  # stays under the 5000 requests/hour REST limit
+PR_PAGE_PACE_SECONDS = 15  # a page costs about 13 of the 5000 hourly GraphQL points, so this leaves room for other gh use
+RATE_LIMIT_WAIT_SECONDS = 600
+MAX_RATE_LIMIT_WAITS = 12
+RATE_LIMITED = re.compile(r"rate limit|abuse|secondary", re.IGNORECASE)
 NOT_AVAILABLE = re.compile(r"HTTP (404|422)")
 TRANSIENT = re.compile(
     r"HTTP 5\d\d|HTTP 403|rate limit|abuse|secondary|timeout|timed out|something went wrong|EOF|connection|TLS",
@@ -20,7 +24,7 @@ query($owner: String!, $name: String!, $first: Int!, $cursor: String) {
       nodes {
         number title mergedAt baseRefOid headRefOid
         author { login }
-        reviewThreads(first: 100) {
+        reviewThreads(first: 50) {
           pageInfo { hasNextPage }
           nodes {
             isResolved isOutdated path diffSide line originalLine startLine originalStartLine
@@ -51,7 +55,8 @@ class NotAvailable(GhError):
 def run(args, retries=6, sleep=time.sleep, runner=subprocess.run):
     """Run `gh api`, backing off on transient failures."""
     sleep(PACE_SECONDS)
-    for attempt in range(retries + 1):
+    attempt = waits = 0
+    while True:
         try:
             proc = runner(["gh", "api", *args], capture_output=True, text=True, errors="replace", timeout=180)
         except subprocess.TimeoutExpired as exc:
@@ -62,13 +67,20 @@ def run(args, retries=6, sleep=time.sleep, runner=subprocess.run):
             return stdout
         if NOT_AVAILABLE.search(detail):
             raise NotAvailable(detail.strip())
-        if attempt == retries or not TRANSIENT.search(f"{detail} {stdout}"):
+        output = f"{detail} {stdout}"
+        if RATE_LIMITED.search(output) and waits < MAX_RATE_LIMIT_WAITS:
+            # The quota refills on a timer, so waiting works and burning the retry budget does not.
+            waits += 1
+            sleep(RATE_LIMIT_WAIT_SECONDS)
+            continue
+        if attempt >= retries or not TRANSIENT.search(output):
             raise GhError(detail.strip() or "gh api failed")
         sleep(min(900, 30 * 2**attempt))
-    raise AssertionError("unreachable")
+        attempt += 1
 
 
 def fetch_pr_page(repo, first, cursor):
+    time.sleep(PR_PAGE_PACE_SECONDS)
     owner, name = repo.split("/", 1)
     args = ["graphql", "-f", f"query={PR_QUERY}", "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"first={first}"]
     if cursor:

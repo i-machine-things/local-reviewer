@@ -247,6 +247,19 @@ class MineTests(unittest.TestCase):
         mine.mine_repo(store, "o/r", 2, fetch=fetch, log=lambda _: None)
         self.assertEqual(cursors, [None, "c1"])
 
+    def test_page_size_recovers_after_a_failure(self):
+        sizes = []
+
+        def fetch(_repo, first, _cursor):
+            sizes.append(first)
+            if len(sizes) == 1:
+                raise gh.GhError("HTTP 502")
+            more = len(sizes) < 3
+            return {"pageInfo": {"hasNextPage": more, "endCursor": "c"}, "nodes": [self.node(len(sizes))]}
+
+        mine.mine_repo(Store(":memory:"), "o/r", 100, fetch=fetch, log=lambda _: None)
+        self.assertEqual(sizes, [25, 12, 24])
+
     def test_page_failure_shrinks_request(self):
         sizes = []
 
@@ -276,6 +289,18 @@ class GhRunTests(unittest.TestCase):
     def test_missing_object_raises_without_retry(self):
         with self.assertRaises(gh.NotAvailable):
             gh.run(["x"], sleep=lambda _: None, runner=self.runner([self.Proc(1, stderr="HTTP 404")]))
+
+    def test_rate_limit_waits_without_spending_retries(self):
+        limited = self.Proc(1, stderr="gh: API rate limit already exceeded")
+        waits = []
+        runner = self.runner([limited, limited, limited, self.Proc(0, stdout="ok")])
+        self.assertEqual(gh.run(["x"], retries=0, sleep=waits.append, runner=runner), "ok")
+        self.assertEqual(waits.count(gh.RATE_LIMIT_WAIT_SECONDS), 3)
+
+    def test_rate_limit_eventually_gives_up(self):
+        limited = [self.Proc(1, stderr="API rate limit exceeded")] * (gh.MAX_RATE_LIMIT_WAITS + 1)
+        with self.assertRaises(gh.GhError):
+            gh.run(["x"], retries=0, sleep=lambda _: None, runner=self.runner(limited))
 
     def test_permanent_error_raises(self):
         with self.assertRaises(gh.GhError):

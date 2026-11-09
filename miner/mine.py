@@ -67,6 +67,7 @@ def mine_repo(store, repo, max_prs, fetch=gh.fetch_pr_page, log=print):
             page_size = max(1, page_size // 2)
             log(f"{repo}: page failed, retrying with {page_size} PRs per page")
             continue
+        page_size = min(25, page_size * 2)  # one oversized PR should not slow every later page
         prs, threads = parse_page(repo, page["nodes"])
         seen += len(prs)
         cursor = page["pageInfo"]["endCursor"] or cursor
