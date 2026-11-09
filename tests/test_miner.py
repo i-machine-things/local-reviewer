@@ -69,6 +69,12 @@ class DiffTests(unittest.TestCase):
         self.assertTrue(diffs.touches_range(hunks, 15, 15))
         self.assertFalse(diffs.touches_range(hunks, 16, 16))
 
+    def test_zero_old_count_insertion_lands_on_the_next_line(self):
+        hunk = diffs.parse_patch("@@ -5,0 +6,1 @@\n+x")[0]
+        self.assertEqual(hunk.touched_old_lines(), {6})
+        self.assertTrue(diffs.touches_range([hunk], 9, 9))
+        self.assertFalse(diffs.touches_range([hunk], 10, 10))
+
     def test_empty_patch(self):
         self.assertEqual(diffs.parse_patch(None), [])
 
@@ -136,6 +142,61 @@ class BuildTests(unittest.TestCase):
         # the whole-PR diff touches the commented line, which is exactly what must not be trusted after a rebase
         store.put_compare("o/r", "c1", "head", "diverged", [{"filename": "src/a.py", "patch": LATER_HUNK}])
         return store
+
+    def test_unknown_author_is_excluded(self):
+        store = seeded_store(thread_row(author=None, author_type=None))
+        cases, funnel = testset.build_cases(store, set(), fetch=no_fetch)
+        self.assertEqual(cases, [])
+        self.assertEqual(funnel["not_independent_human"], 1)
+
+    def test_repo_missing_from_config_is_skipped(self):
+        cases, funnel = testset.build_cases(seeded_store(), set(), allowed={"other/repo"}, fetch=no_fetch)
+        self.assertEqual(cases, [])
+        self.assertEqual(funnel["repo_not_configured"], 1)
+
+    def test_same_hunk_at_two_commits_gets_distinct_ids(self):
+        hunk = diffs.parse_patch(FILE_HUNK)[0]
+        pr = pr_row()
+        first = testset._record(pr, "src/a.py", hunk, "bug", "train", "c1", [])
+        second = testset._record(pr, "src/a.py", hunk, "bug", "train", "c2", [])
+        self.assertNotEqual(first["id"], second["id"])
+
+    def test_control_is_kept_out_of_a_long_comment_span(self):
+        patch = f"{FILE_HUNK}\n@@ -40,1 +42,2 @@\n forty\n+added"
+        store = seeded_store(compare=[{"filename": "src/a.py", "patch": patch}])
+        span = thread_row(root_id=103, body="looks good", original_start_line=20, original_line=80)
+        store.save_page("o/r", [pr_row()], [span], "x", 1, True)
+        cases, _ = testset.build_cases(store, set(), fetch=no_fetch)
+        self.assertEqual([c["kind"] for c in cases], ["bug"])
+
+    def test_control_sees_a_later_rename(self):
+        later = [
+            {"filename": "src/a.py", "patch": LATER_HUNK},
+            {"filename": "src/new.py", "previous_filename": "src/b.py", "patch": "@@ -5,1 +5,1 @@\n-five\n+5"},
+        ]
+        cases, _ = testset.build_cases(seeded_store(later=later), set(), fetch=no_fetch)
+        self.assertEqual([c["kind"] for c in cases], ["bug"])
+
+    def test_control_needs_a_complete_file_list(self):
+        padding = [{"filename": f"src/p{i}.py", "patch": "@@ -900 +900 @@\n-a\n+b"} for i in range(299)]
+        later = [{"filename": "src/a.py", "patch": LATER_HUNK}, *padding]
+        cases, _ = testset.build_cases(seeded_store(later=later), set(), fetch=no_fetch)
+        self.assertEqual([c["kind"] for c in cases], ["bug"])
+
+    def test_later_comment_on_a_chosen_hunk_is_kept_past_the_cap(self):
+        patch = "\n".join(f"@@ -{n},1 +{n},2 @@\n ctx\n+new{n}" for n in (100, 200, 300))
+        hunks = "\n".join(f"@@ -{n},1 +{n},1 @@\n-new\n+fixed" for n in (2, 101, 201, 301))
+        store = seeded_store(
+            compare=[{"filename": "src/a.py", "patch": f"{FILE_HUNK}\n{patch}"}],
+            later=[{"filename": "src/a.py", "patch": hunks}],
+        )
+        extra = [thread_row(root_id=200 + n, original_line=n + 1) for n in (100, 200)]
+        extra.append(thread_row(root_id=500, original_line=3))
+        store.save_page("o/r", [pr_row()], extra, "x", 1, True)
+        cases, _ = testset.build_cases(store, set(), fetch=no_fetch)
+        first = next(c for c in cases if c["kind"] == "bug" and c["hunk"] == FILE_HUNK)
+        self.assertEqual(len(first["truth"]), 2)
+        self.assertLessEqual(sum(c["kind"] == "bug" for c in cases), testset.MAX_BUG_CASES_PER_PR)
 
     def test_rebased_pr_counts_only_a_real_change_to_the_file(self):
         versions = {"c1": "one\ntwo\nthree\nfour", "head": "one\ntwo fixed\nthree\nfour"}
@@ -233,6 +294,22 @@ class MineTests(unittest.TestCase):
             "author": None,
             "reviewThreads": {"pageInfo": {"hasNextPage": False}, "nodes": [{"comments": {"nodes": []}}]},
         }
+
+    def test_stores_original_coordinates_not_current_ones(self):
+        node = self.node(7)
+        comment = {
+            "databaseId": 9, "createdAt": "2026-01-02", "body": "b", "diffHunk": "@@", "originalCommit": {"oid": "c9"},
+            "author": {"__typename": "User", "login": "r"},
+        }
+        node["reviewThreads"]["nodes"] = [{
+            "isResolved": True, "isOutdated": True, "path": "a.py", "diffSide": "RIGHT", "line": 50, "originalLine": 12,
+            "startLine": 48, "originalStartLine": 10, "comments": {"nodes": [comment]},
+        }]
+        _, threads = mine.parse_page("o/r", [node])
+        self.assertEqual(
+            (threads[0]["original_line"], threads[0]["original_start_line"], threads[0]["line"]), (12, 10, 50)
+        )
+        self.assertEqual(threads[0]["original_commit"], "c9")
 
     def test_resumes_from_saved_cursor(self):
         cursors = []

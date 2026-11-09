@@ -12,6 +12,7 @@ class Hunk:
     new_start: int
     new_count: int
     text: str
+    old_count: int = 1
 
     @property
     def new_end(self):
@@ -34,7 +35,8 @@ class Hunk:
 
     def touched_old_lines(self):
         """Old-file line numbers this hunk removes, or inserts in front of."""
-        touched, current = set(), self.old_start
+        # A hunk with no old lines names the line it follows, so its insertions land on the next one.
+        touched, current = set(), self.old_start + (self.old_count == 0)
         for line in self.text.split("\n")[1:]:
             if line.startswith("-"):
                 touched.add(current)
@@ -53,8 +55,9 @@ def parse_patch(patch):
 
     def flush():
         if header:
-            count = int(header.group(4)) if header.group(4) is not None else 1
-            hunks.append(Hunk(int(header.group(1)), int(header.group(3)), count, "\n".join(body)))
+            old_count = int(header.group(2)) if header.group(2) is not None else 1
+            new_count = int(header.group(4)) if header.group(4) is not None else 1
+            hunks.append(Hunk(int(header.group(1)), int(header.group(3)), new_count, "\n".join(body), old_count))
 
     for line in patch.split("\n"):
         match = HUNK_HEADER.match(line)

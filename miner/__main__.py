@@ -28,7 +28,7 @@ def load_config(path):
 
 def write_atomic(path, lines):
     """Replace a file in one step, so a failed build can never leave a truncated dataset behind."""
-    temp = path.with_suffix(path.suffix + ".tmp")
+    temp = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
     with open(temp, "w", encoding="utf-8") as handle:
         handle.writelines(line + "\n" for line in lines)
     os.replace(temp, path)
@@ -58,10 +58,11 @@ def summarize(cases):
 
 
 def cmd_build(args):
-    holdouts = {repo["name"] for repo in load_config(args.config) if repo.get("holdout")}
+    config = load_config(args.config)
+    holdouts = {repo["name"] for repo in config if repo.get("holdout")}
     store = Store(args.data / "corpus.db")
     try:
-        cases, funnel = build_cases(store, holdouts)
+        cases, funnel = build_cases(store, holdouts, allowed={repo["name"] for repo in config})
     finally:
         store.close()
     out = args.data / "cases"

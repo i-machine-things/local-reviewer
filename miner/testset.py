@@ -18,6 +18,7 @@ EXCLUDED_PATH = re.compile(
 MAX_CHANGED_LINES = 150
 MAX_BUG_CASES_PER_PR = 3
 MAX_CONTROL_CHECKS = 5
+MAX_COMPARE_FILES = 300  # GitHub stops listing files here, so a file missing from a full list may still have changed
 CONTROL_MARGIN = 10  # review-thread line numbers drift between commits, so keep controls well clear of them
 
 
@@ -74,9 +75,10 @@ class LaterChanges:
         """Return the later hunks for a file, or None if GitHub cannot tell us."""
         if self.rebased:
             return self._hunks_by_file_diff(path)
-        file = next((f for f in self.compare["files"] if f["filename"] == path), None)
+        files = self.compare["files"]
+        file = next((f for f in files if path in (f["filename"], f.get("previous_filename"))), None)
         if file is None:
-            return []
+            return None if len(files) >= MAX_COMPARE_FILES else []
         return diffs.parse_patch(file["patch"]) if file.get("patch") else None
 
     def _hunks_by_file_diff(self, path):
@@ -94,14 +96,15 @@ class LaterChanges:
         return None if cached["status"] == UNAVAILABLE else diffs.parse_patch(cached["files"][0]["patch"])
 
 
-def _case_id(repo, number, path, hunk, kind):
-    return hashlib.sha256(f"{kind}|{repo}#{number}|{path}|{hunk.text}".encode()).hexdigest()[:16]
+def _case_id(repo, number, path, hunk, kind, commit):
+    return hashlib.sha256(f"{kind}|{repo}#{number}|{commit}|{path}|{hunk.text}".encode()).hexdigest()[:16]
 
 
 def _find_bug(store, pr, thread, fetch, fetch_file, funnel):
     """Return (hunk, truth, later_compare, compare) if the thread is a confirmed defect, counting why others fail."""
     repo, path, line = pr["repo"], thread["path"], thread["original_line"]
-    if signals.is_bot(thread["author"], thread["author_type"]) or thread["author"] == pr["author"]:
+    author = thread["author"]
+    if not author or signals.is_bot(author, thread["author_type"]) or author == pr["author"]:
         return funnel.update(["not_independent_human"])
     if thread["diff_side"] != "RIGHT" or not line or not thread["original_commit"]:
         return funnel.update(["not_on_new_code"])
@@ -151,19 +154,20 @@ def _pick_control(bug_hunk, later, compare, threads, used):
     A thread with no line number could be anywhere in the file, so it disqualifies every hunk there. Later changes are
     checked last and lazily, because on a rebased PR each check costs API calls.
     """
-    comment_lines = collections.defaultdict(list)
+    comment_spans = collections.defaultdict(list)
     for thread in threads:
-        comment_lines[thread["path"]].append(thread["original_line"])
+        end = thread["original_line"]
+        comment_spans[thread["path"]].append((thread["original_start_line"] or end, end))
     candidates = []
     for file in compare["files"]:
         path = file["filename"]
         if not is_reviewable(path):
             continue
         for hunk in diffs.parse_patch(file.get("patch")):
-            near = range(hunk.new_start - CONTROL_MARGIN, hunk.new_end + CONTROL_MARGIN + 1)
+            low, high = hunk.new_start - CONTROL_MARGIN, hunk.new_end + CONTROL_MARGIN
             if (path, hunk.new_start) in used or not hunk.added_new_lines() or hunk.changed_lines > MAX_CHANGED_LINES:
                 continue
-            if not any(line is None or line in near for line in comment_lines[path]):
+            if not any(end is None or (start <= high and end >= low) for start, end in comment_spans[path]):
                 candidates.append((abs(hunk.changed_lines - bug_hunk.changed_lines), path, hunk.new_start, hunk))
     for _, path, _, hunk in sorted(candidates, key=lambda c: c[:3])[:MAX_CONTROL_CHECKS]:
         later_hunks = later.hunks(path)
@@ -175,7 +179,7 @@ def _pick_control(bug_hunk, later, compare, threads, used):
 
 def _record(pr, path, hunk, kind, split, commit, truth):
     return {
-        "id": _case_id(pr["repo"], pr["number"], path, hunk, kind),
+        "id": _case_id(pr["repo"], pr["number"], path, hunk, kind, commit),
         "kind": kind,
         "split": split,
         "repo": pr["repo"],
@@ -189,21 +193,25 @@ def _record(pr, path, hunk, kind, split, commit, truth):
     }
 
 
-def build_cases(store, holdouts, fetch=gh.fetch_compare, fetch_file=gh.fetch_file, log=print):
-    """Return (cases, funnel). The funnel shows where candidates drop out, which is how the filters get tuned."""
+def build_cases(store, holdouts, allowed=None, fetch=gh.fetch_compare, fetch_file=gh.fetch_file, log=print):
+    """Return (cases, funnel). The funnel shows where candidates drop out, which is how the filters get tuned.
+
+    A repo dropped from the config stays in the store. `allowed` keeps it out, because a former holdout left in would
+    land in train or dev and unseal its test cases.
+    """
     cases, funnel = [], collections.Counter()
     for index, pr in enumerate(store.prs(), 1):
         if index % 500 == 0:
             log(f"build: {index} PRs, {funnel['confirmed_bug']} confirmed bugs")
+        if allowed is not None and pr["repo"] not in allowed:
+            funnel.update(["repo_not_configured"])
+            continue
         funnel.update(["prs"])
         threads = store.threads_for(pr["repo"], pr["number"])
         funnel.update({"threads": len(threads)})
         split = split_for(pr["repo"], pr["number"], pr["repo"] in holdouts)
         by_hunk, used_controls, controls = {}, set(), []
         for thread in threads:
-            if len(by_hunk) >= MAX_BUG_CASES_PER_PR:
-                funnel.update(["over_pr_cap"])
-                break
             found = _find_bug(store, pr, thread, fetch, fetch_file, funnel)
             if not found:
                 continue
@@ -211,6 +219,9 @@ def build_cases(store, holdouts, fetch=gh.fetch_compare, fetch_file=gh.fetch_fil
             key = (thread["path"], hunk.new_start, thread["original_commit"])
             if key in by_hunk:
                 by_hunk[key]["truth"].append(truth)
+                continue
+            if len(by_hunk) >= MAX_BUG_CASES_PER_PR:
+                funnel.update(["over_pr_cap"])
                 continue
             by_hunk[key] = _record(pr, thread["path"], hunk, "bug", split, thread["original_commit"], [truth])
             if pr["threads_truncated"]:

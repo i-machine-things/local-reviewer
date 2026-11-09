@@ -90,7 +90,7 @@ def fetch_pr_page(repo, first, cursor):
 
 def fetch_compare(repo, base, head):
     """Return {status, files}. Only the fields the build needs are kept, because compare responses are huge."""
-    jq = "{status: .status, files: [(.files // [])[] | {filename, patch}]}"
+    jq = "{status: .status, files: [(.files // [])[] | {filename, previous_filename, patch}]}"
     return json.loads(run([f"repos/{repo}/compare/{base}...{head}", "--jq", jq]))
 
 
