@@ -1,0 +1,45 @@
+# Public repos only. Those marked holdout feed the sealed test split and never reach the teacher pass.
+
+[[repo]]
+name = "django/django"
+
+[[repo]]
+name = "python/cpython"
+
+[[repo]]
+name = "pydantic/pydantic"
+holdout = true
+
+[[repo]]
+name = "tokio-rs/tokio"
+
+[[repo]]
+name = "tauri-apps/tauri"
+
+[[repo]]
+name = "bevyengine/bevy"
+holdout = true
+
+[[repo]]
+name = "FreeCAD/FreeCAD"
+
+[[repo]]
+name = "OpenCPN/OpenCPN"
+
+[[repo]]
+name = "bitcoin/bitcoin"
+holdout = true
+
+[[repo]]
+name = "dotnet/runtime"
+
+[[repo]]
+name = "dotnet/aspnetcore"
+holdout = true
+
+[[repo]]
+name = "etcd-io/etcd"
+
+[[repo]]
+name = "prometheus/prometheus"
+holdout = true
