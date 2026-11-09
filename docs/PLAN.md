@@ -8,8 +8,8 @@ Every stage has to beat the previous one on a fixed test set, or it does not shi
 | Machine | Job |
 |---|---|
 | Laptop | Source code only. It has about 1.5 GB free, so no data lives here. |
-| TrueNAS `claude-sandbox` | Mining, the corpus database, test sets, run results. |
-| Workstation `ollama-rocm` | Model inference only. |
+| TrueNAS | Storage only: the corpus database, test sets, rules, run results, checkpoints. |
+| Workstation (RX 6950 XT) | All heavy work: inference, scoring, embeddings, training. |
 | Google AI Studio | Teacher model, public-repo data only. |
 
 ## Rules that apply to every stage
@@ -19,12 +19,20 @@ Every stage has to beat the previous one on a fixed test set, or it does not shi
 - **Whole repos are held out for `test`**, so a rule learned from a project cannot leak into that project's score.
 - **Private code never goes to the free tier.** Google may use free-tier content to improve its products, and
   human reviewers may read it. Private repos stay local, or use the paid tier.
-- **Rules only, no fine-tuning on Gemini output.** The Gemini API terms bar using the service to develop competing
-  models. Storing review rules is the conservative reading.
+- **No training on Gemini output.** The Gemini API terms bar using the service to develop competing models. Teacher
+  output only ever becomes review rules. Training data comes from the human review corpus.
 - **Diffs and review comments are untrusted input.** They are public text and can contain instructions aimed at
   a model. Prompts must mark them as data, and no stage may run anything they say.
 
 ## Milestones
+
+### 0. Shared storage
+
+Create a TrueNAS dataset for this project and share it to the workstation, so the workstation reads and writes the
+same files the server keeps. Mining is light network work and can write to it from the server sandbox.
+
+Keep the SQLite database on a disk local to whichever machine is writing it, or give it one writer at a time.
+SQLite locking is unreliable over network shares. Case files are plain JSONL and are safe to share.
 
 ### 1. Corpus and test set (this branch)
 
@@ -42,8 +50,8 @@ the same broken down by category and language.
 
 Compare a bare prompt on `qwen2.5-coder:14b` and `qwen3-coder:30b`. Pick on accuracy; speed only breaks real ties.
 
-Open: neither Claude's tools nor the sandbox can reach the workstation. Results need a path, most likely a dataset
-shared to both machines or commands Allan runs himself.
+Runs on the workstation against the shared dataset. Claude's tools cannot reach the workstation directly, so runs are
+started through commands Allan issues, and results are read back from storage.
 
 ### 3. Triage and context
 
@@ -70,7 +78,13 @@ are left out unless a test shows they help. Output line-anchored findings with a
 
 Runs through the existing `localcode` backend, as a pre-push command first and then in CI.
 
-### 7. Feedback loop
+### 7. Fine-tuning on the workstation
+
+Train an adapter on the human review corpus (`train` only, tuned on `dev`), with checkpoints written to the server.
+Start with a small trial, because training on ROCm with 16 GB of VRAM has not been tested here. Ship the adapter only
+if it beats the rules-and-retrieval pipeline from milestone 6 on `test`.
+
+### 8. Feedback loop
 
 Record which findings get fixed or dismissed on real PRs and use that to promote or retire rules. Refresh the corpus
 periodically. Score `test` at each release, and add a new held-out repo when the old ones have been seen too often.
