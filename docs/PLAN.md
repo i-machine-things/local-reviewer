@@ -39,8 +39,15 @@ SQLite locking is unreliable over network shares. Case files are plain JSONL and
 Mine merged public PRs for human review comments that led to a code change. Each bug case pairs the hunk as the
 reviewer saw it with the comment and the fix. Each gets a presumed-clean control hunk from the same PR.
 
+Keyword matching alone is not enough. On the first 6,500 PRs it confirmed 76 bug cases, and only 2 or 3 of the first
+8 hand-checked were real defects. It also misses defects described in plain words. So the keyword filter gets replaced
+by a classifier stage running on the workstation: a local model reads every human comment on reviewable code, together
+with the fix, and decides whether it describes a defect. The classifier sees `train` and `dev` examples while it is
+being tuned, and is applied to `test` unchanged.
+
 Done when: a test set of at least 200 bug cases and 200 controls exists, and a hand audit of 50 sampled bug cases
-finds at least 80% are real defects. If the audit misses, tighten the filters and rebuild.
+finds at least 80% are real defects. If the audit misses, tighten the classifier and rebuild. Audits read `train` and
+`dev` while tuning. The `test` audit happens once, at the end.
 
 ### 2. Scoring harness and baseline
 
