@@ -14,6 +14,9 @@ on:
   pull_request:
     branches: [master, stable]
 
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Secret scanning — gitleaks. Language-agnostic: keep this job as-is in
