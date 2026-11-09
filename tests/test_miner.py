@@ -130,12 +130,39 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(cases, [])
         self.assertEqual(funnel["not_independent_human"], 1)
 
-    def test_rebased_commit_is_not_treated_as_a_fix(self):
-        store = seeded_store()
+    @staticmethod
+    def rebased_store():
+        store = seeded_store(compare=[{"filename": "src/a.py", "patch": FILE_HUNK}])
+        # the whole-PR diff touches the commented line, which is exactly what must not be trusted after a rebase
         store.put_compare("o/r", "c1", "head", "diverged", [{"filename": "src/a.py", "patch": LATER_HUNK}])
-        cases, funnel = testset.build_cases(store, set(), fetch=no_fetch)
+        return store
+
+    def test_rebased_pr_counts_only_a_real_change_to_the_file(self):
+        versions = {"c1": "one\ntwo\nthree\nfour", "head": "one\ntwo fixed\nthree\nfour"}
+        cases, funnel = testset.build_cases(
+            self.rebased_store(), set(), fetch=no_fetch, fetch_file=lambda _r, oid, _p: versions[oid]
+        )
+        self.assertEqual([c["kind"] for c in cases], ["bug"])
+        self.assertEqual(funnel["checked_by_file_diff"], 1)
+
+    def test_rebased_pr_with_identical_file_is_not_a_fix(self):
+        cases, funnel = testset.build_cases(
+            self.rebased_store(), set(), fetch=no_fetch, fetch_file=lambda *_: "one\ntwo\nthree\nfour"
+        )
         self.assertEqual(cases, [])
-        self.assertEqual(funnel["commit_not_ancestor_of_head"], 1)
+        self.assertEqual(funnel["line_unchanged_before_merge"], 1)
+
+    def test_rebased_file_diff_is_cached(self):
+        calls = []
+        store = self.rebased_store()
+
+        def read(_repo, oid, _path):
+            calls.append(oid)
+            return "same"
+
+        for _ in range(2):
+            testset.build_cases(store, set(), fetch=no_fetch, fetch_file=read)
+        self.assertEqual(calls, ["c1", "head"])
 
     def test_unchanged_line_is_not_a_bug(self):
         far_away = [{"filename": "src/a.py", "patch": "@@ -90,1 +90,1 @@\n-x\n+y"}]
@@ -193,9 +220,9 @@ class BuildTests(unittest.TestCase):
         store = Store(":memory:")
         store.save_page("o/r", [pr_row()], [thread_row()], "x", 1, True)
         for _ in range(2):
-            cases, _ = testset.build_cases(store, set(), fetch=missing)
+            cases, _ = testset.build_cases(store, set(), fetch=missing, fetch_file=missing)
             self.assertEqual(cases, [])
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)  # one compare, then one file read before the file diff gives up
 
 
 class MineTests(unittest.TestCase):

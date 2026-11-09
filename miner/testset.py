@@ -17,6 +17,7 @@ EXCLUDED_PATH = re.compile(
 )
 MAX_CHANGED_LINES = 150
 MAX_BUG_CASES_PER_PR = 3
+MAX_CONTROL_CHECKS = 5
 CONTROL_MARGIN = 10  # review-thread line numbers drift between commits, so keep controls well clear of them
 
 
@@ -54,11 +55,50 @@ def patch_for(compare, path):
     return next((f.get("patch") for f in compare["files"] if f["filename"] == path), None)
 
 
+class LaterChanges:
+    """Answers what changed in a file between the commented commit and the merged head.
+
+    The compare API is one call for the whole PR, but after a rebase it spans the entire PR and would "confirm" nearly
+    every comment. Rebased PRs fall back to diffing the two versions of just the file in question.
+    """
+
+    def __init__(self, store, repo, commit, head, fetch, fetch_file):
+        self.store, self.repo, self.commit, self.head, self.fetch_file = store, repo, commit, head, fetch_file
+        self.compare = cached_compare(store, repo, commit, head, fetch)
+
+    @property
+    def rebased(self):
+        return self.compare["status"] not in ("ahead", "identical")
+
+    def hunks(self, path):
+        """Return the later hunks for a file, or None if GitHub cannot tell us."""
+        if self.rebased:
+            return self._hunks_by_file_diff(path)
+        file = next((f for f in self.compare["files"] if f["filename"] == path), None)
+        if file is None:
+            return []
+        return diffs.parse_patch(file["patch"]) if file.get("patch") else None
+
+    def _hunks_by_file_diff(self, path):
+        key = f"{self.commit}:{path}"
+        cached = self.store.get_compare(self.repo, key, self.head)
+        if cached is None:
+            try:
+                old = self.fetch_file(self.repo, self.commit, path)
+                new = self.fetch_file(self.repo, self.head, path)
+            except gh.NotAvailable:
+                self.store.put_compare(self.repo, key, self.head, UNAVAILABLE, [])
+                return None
+            cached = {"status": "file-diff", "files": [{"filename": path, "patch": diffs.diff_texts(old, new)}]}
+            self.store.put_compare(self.repo, key, self.head, cached["status"], cached["files"])
+        return None if cached["status"] == UNAVAILABLE else diffs.parse_patch(cached["files"][0]["patch"])
+
+
 def _case_id(repo, number, path, hunk, kind):
     return hashlib.sha256(f"{kind}|{repo}#{number}|{path}|{hunk.text}".encode()).hexdigest()[:16]
 
 
-def _find_bug(store, pr, thread, fetch, funnel):
+def _find_bug(store, pr, thread, fetch, fetch_file, funnel):
     """Return (hunk, truth, later_compare, compare) if the thread is a confirmed defect, counting why others fail."""
     repo, path, line = pr["repo"], thread["path"], thread["original_line"]
     if signals.is_bot(thread["author"], thread["author_type"]) or thread["author"] == pr["author"]:
@@ -75,12 +115,13 @@ def _find_bug(store, pr, thread, fetch, funnel):
     if commit == pr["head_oid"]:
         return funnel.update(["no_later_commit"])
 
-    later = cached_compare(store, repo, commit, pr["head_oid"], fetch)
-    if later["status"] not in ("ahead", "identical"):
-        # After a rebase this comparison spans the whole PR, so it would "confirm" nearly every comment.
-        return funnel.update(["commit_not_ancestor_of_head"])
+    later = LaterChanges(store, repo, commit, pr["head_oid"], fetch, fetch_file)
+    fix_hunks = later.hunks(path)
+    if fix_hunks is None:
+        return funnel.update(["later_version_unavailable"])
+    if later.rebased:
+        funnel.update(["checked_by_file_diff"])
     start = thread["original_start_line"] or line
-    fix_hunks = diffs.parse_patch(patch_for(later, path))
     if not diffs.touches_range(fix_hunks, start, line):
         return funnel.update(["line_unchanged_before_merge"])
 
@@ -104,40 +145,32 @@ def _find_bug(store, pr, thread, fetch, funnel):
     return hunk, truth, later, compare
 
 
-def _is_quiet(hunk, comment_lines, later_hunks):
-    """True if no review thread sits near this hunk and nothing in it changed before merge.
-
-    A thread with no line number could be anywhere in the file, so it disqualifies every hunk there.
-    """
-    near = range(hunk.new_start - CONTROL_MARGIN, hunk.new_end + CONTROL_MARGIN + 1)
-    if any(line is None or line in near for line in comment_lines):
-        return False
-    return not diffs.touches_range(later_hunks, hunk.new_start, hunk.new_end)
-
-
 def _pick_control(bug_hunk, later, compare, threads, used):
-    """Pick the quiet hunk closest in size to the bug hunk."""
+    """Pick the hunk closest in size to the bug hunk that no thread sits near and that did not change before merge.
+
+    A thread with no line number could be anywhere in the file, so it disqualifies every hunk there. Later changes are
+    checked last and lazily, because on a rebased PR each check costs API calls.
+    """
     comment_lines = collections.defaultdict(list)
     for thread in threads:
         comment_lines[thread["path"]].append(thread["original_line"])
-    later_patches = {f["filename"]: f.get("patch") for f in later["files"]}
     candidates = []
     for file in compare["files"]:
         path = file["filename"]
-        if not is_reviewable(path) or (path in later_patches and not later_patches[path]):
-            continue  # a changed file with no patch is too big or binary, so what changed in it is unknown
-        later_hunks = diffs.parse_patch(later_patches.get(path))
+        if not is_reviewable(path):
+            continue
         for hunk in diffs.parse_patch(file.get("patch")):
-            key = (path, hunk.new_start)
-            if key in used or not hunk.added_new_lines() or hunk.changed_lines > MAX_CHANGED_LINES:
+            near = range(hunk.new_start - CONTROL_MARGIN, hunk.new_end + CONTROL_MARGIN + 1)
+            if (path, hunk.new_start) in used or not hunk.added_new_lines() or hunk.changed_lines > MAX_CHANGED_LINES:
                 continue
-            if _is_quiet(hunk, comment_lines[path], later_hunks):
+            if not any(line is None or line in near for line in comment_lines[path]):
                 candidates.append((abs(hunk.changed_lines - bug_hunk.changed_lines), path, hunk.new_start, hunk))
-    if not candidates:
-        return None
-    _, path, _, hunk = min(candidates, key=lambda c: c[:3])
-    used.add((path, hunk.new_start))
-    return path, hunk
+    for _, path, _, hunk in sorted(candidates, key=lambda c: c[:3])[:MAX_CONTROL_CHECKS]:
+        later_hunks = later.hunks(path)
+        if later_hunks is not None and not diffs.touches_range(later_hunks, hunk.new_start, hunk.new_end):
+            used.add((path, hunk.new_start))
+            return path, hunk
+    return None
 
 
 def _record(pr, path, hunk, kind, split, commit, truth):
@@ -156,7 +189,7 @@ def _record(pr, path, hunk, kind, split, commit, truth):
     }
 
 
-def build_cases(store, holdouts, fetch=gh.fetch_compare, log=print):
+def build_cases(store, holdouts, fetch=gh.fetch_compare, fetch_file=gh.fetch_file, log=print):
     """Return (cases, funnel). The funnel shows where candidates drop out, which is how the filters get tuned."""
     cases, funnel = [], collections.Counter()
     for index, pr in enumerate(store.prs(), 1):
@@ -171,7 +204,7 @@ def build_cases(store, holdouts, fetch=gh.fetch_compare, log=print):
             if len(by_hunk) >= MAX_BUG_CASES_PER_PR:
                 funnel.update(["over_pr_cap"])
                 break
-            found = _find_bug(store, pr, thread, fetch, funnel)
+            found = _find_bug(store, pr, thread, fetch, fetch_file, funnel)
             if not found:
                 continue
             hunk, truth, later, compare = found

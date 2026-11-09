@@ -3,6 +3,7 @@ import json
 import re
 import subprocess
 import time
+import urllib.parse
 
 PACE_SECONDS = 0.75  # stays under the 5000 requests/hour REST limit
 NOT_AVAILABLE = re.compile(r"HTTP (404|422)")
@@ -52,7 +53,7 @@ def run(args, retries=6, sleep=time.sleep, runner=subprocess.run):
     sleep(PACE_SECONDS)
     for attempt in range(retries + 1):
         try:
-            proc = runner(["gh", "api", *args], capture_output=True, text=True, timeout=180)
+            proc = runner(["gh", "api", *args], capture_output=True, text=True, errors="replace", timeout=180)
         except subprocess.TimeoutExpired as exc:
             detail, returncode, stdout = f"timeout: {exc}", 1, ""
         else:
@@ -79,3 +80,8 @@ def fetch_compare(repo, base, head):
     """Return {status, files}. Only the fields the build needs are kept, because compare responses are huge."""
     jq = "{status: .status, files: [(.files // [])[] | {filename, patch}]}"
     return json.loads(run([f"repos/{repo}/compare/{base}...{head}", "--jq", jq]))
+
+
+def fetch_file(repo, oid, path):
+    url = f"repos/{repo}/contents/{urllib.parse.quote(path)}?ref={oid}"
+    return run([url, "-H", "Accept: application/vnd.github.raw+json"])

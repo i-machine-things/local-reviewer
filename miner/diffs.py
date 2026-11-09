@@ -1,4 +1,5 @@
 """Unified-diff parsing. Line numbers here decide whether a review comment actually led to a fix."""
+import difflib
 import re
 from dataclasses import dataclass
 
@@ -18,12 +19,12 @@ class Hunk:
 
     @property
     def changed_lines(self):
-        return sum(1 for line in self.text.splitlines()[1:] if line[:1] in ("+", "-"))
+        return sum(1 for line in self.text.split("\n")[1:] if line[:1] in ("+", "-"))
 
     def added_new_lines(self):
         """New-file line numbers of the lines this hunk adds."""
         added, current = set(), self.new_start
-        for line in self.text.splitlines()[1:]:
+        for line in self.text.split("\n")[1:]:
             if line.startswith("+"):
                 added.add(current)
                 current += 1
@@ -34,7 +35,7 @@ class Hunk:
     def touched_old_lines(self):
         """Old-file line numbers this hunk removes, or inserts in front of."""
         touched, current = set(), self.old_start
-        for line in self.text.splitlines()[1:]:
+        for line in self.text.split("\n")[1:]:
             if line.startswith("-"):
                 touched.add(current)
                 current += 1
@@ -64,6 +65,11 @@ def parse_patch(patch):
             body.append(line)
     flush()
     return hunks
+
+
+def diff_texts(old, new):
+    """Line-level diff of two file versions, in the same format GitHub returns."""
+    return "\n".join(difflib.unified_diff(old.split("\n"), new.split("\n"), n=0, lineterm=""))
 
 
 def hunk_at_new_line(hunks, line):

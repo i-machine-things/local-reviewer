@@ -8,5 +8,5 @@
 
 ## Test Set Integrity
 
-- Check the GitHub compare `status` before trusting a commit-to-head diff. After a rebase it spans the whole PR and would "confirm" nearly every comment as fixed.
+- Check the GitHub compare `status` before trusting a commit-to-head diff. After a rebase it spans the whole PR, so `LaterChanges` diffs the two file versions instead.
 - Never send a case's `truth` to a model under test, and keep the `test` split away from teacher and tuning steps.
