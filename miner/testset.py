@@ -17,6 +17,7 @@ EXCLUDED_PATH = re.compile(
 )
 MAX_CHANGED_LINES = 150
 MAX_BUG_CASES_PER_PR = 3
+CONTROL_MARGIN = 10  # review-thread line numbers drift between commits, so keep controls well clear of them
 
 
 def language_of(path):
@@ -103,17 +104,34 @@ def _find_bug(store, pr, thread, fetch, funnel):
     return hunk, truth, later, compare
 
 
-def _pick_control(pr, bug_hunk, later, compare, commented_paths, used):
-    """Pick the hunk closest in size to the bug hunk, from a file nobody commented on that did not change afterwards."""
-    changed_later = {f["filename"] for f in later["files"]}
+def _is_quiet(hunk, comment_lines, later_hunks):
+    """True if no review thread sits near this hunk and nothing in it changed before merge.
+
+    A thread with no line number could be anywhere in the file, so it disqualifies every hunk there.
+    """
+    near = range(hunk.new_start - CONTROL_MARGIN, hunk.new_end + CONTROL_MARGIN + 1)
+    if any(line is None or line in near for line in comment_lines):
+        return False
+    return not diffs.touches_range(later_hunks, hunk.new_start, hunk.new_end)
+
+
+def _pick_control(bug_hunk, later, compare, threads, used):
+    """Pick the quiet hunk closest in size to the bug hunk."""
+    comment_lines = collections.defaultdict(list)
+    for thread in threads:
+        comment_lines[thread["path"]].append(thread["original_line"])
+    later_patches = {f["filename"]: f.get("patch") for f in later["files"]}
     candidates = []
     for file in compare["files"]:
         path = file["filename"]
-        if path in commented_paths or path in changed_later or not is_reviewable(path):
-            continue
+        if not is_reviewable(path) or (path in later_patches and not later_patches[path]):
+            continue  # a changed file with no patch is too big or binary, so what changed in it is unknown
+        later_hunks = diffs.parse_patch(later_patches.get(path))
         for hunk in diffs.parse_patch(file.get("patch")):
             key = (path, hunk.new_start)
-            if key not in used and hunk.added_new_lines() and hunk.changed_lines <= MAX_CHANGED_LINES:
+            if key in used or not hunk.added_new_lines() or hunk.changed_lines > MAX_CHANGED_LINES:
+                continue
+            if _is_quiet(hunk, comment_lines[path], later_hunks):
                 candidates.append((abs(hunk.changed_lines - bug_hunk.changed_lines), path, hunk.new_start, hunk))
     if not candidates:
         return None
@@ -148,7 +166,6 @@ def build_cases(store, holdouts, fetch=gh.fetch_compare, log=print):
         threads = store.threads_for(pr["repo"], pr["number"])
         funnel.update({"threads": len(threads)})
         split = split_for(pr["repo"], pr["number"], pr["repo"] in holdouts)
-        commented_paths = {t["path"] for t in threads}
         by_hunk, used_controls, controls = {}, set(), []
         for thread in threads:
             if len(by_hunk) >= MAX_BUG_CASES_PER_PR:
@@ -165,7 +182,7 @@ def build_cases(store, holdouts, fetch=gh.fetch_compare, log=print):
             by_hunk[key] = _record(pr, thread["path"], hunk, "bug", split, thread["original_commit"], [truth])
             if pr["threads_truncated"]:
                 continue  # an unseen thread could be sitting on any file, so no hunk here is known to be uncommented
-            control = _pick_control(pr, hunk, later, compare, commented_paths, used_controls)
+            control = _pick_control(hunk, later, compare, threads, used_controls)
             if control:
                 path, control_hunk = control
                 controls.append(_record(pr, path, control_hunk, "clean", split, thread["original_commit"], []))

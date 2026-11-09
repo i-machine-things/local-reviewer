@@ -148,7 +148,21 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(cases, [])
         self.assertEqual(funnel["comment_not_on_added_line"], 1)
 
-    def test_control_never_comes_from_a_file_changed_later(self):
+    def test_control_can_be_a_quiet_hunk_in_the_commented_file(self):
+        patch = f"{FILE_HUNK}\n@@ -80,1 +82,2 @@\n eighty\n+added"
+        store = seeded_store(compare=[{"filename": "src/a.py", "patch": patch}])
+        cases, _ = testset.build_cases(store, set(), fetch=no_fetch)
+        clean = next(c for c in cases if c["kind"] == "clean")
+        self.assertTrue(clean["hunk"].startswith("@@ -80"))
+
+    def test_control_is_kept_away_from_other_comments(self):
+        patch = f"{FILE_HUNK}\n@@ -30,1 +32,2 @@\n thirty\n+added"
+        store = seeded_store(compare=[{"filename": "src/a.py", "patch": patch}])
+        store.save_page("o/r", [pr_row()], [thread_row(root_id=102, body="looks good", original_line=33)], "x", 1, True)
+        cases, _ = testset.build_cases(store, set(), fetch=no_fetch)
+        self.assertEqual([c["kind"] for c in cases], ["bug"])
+
+    def test_control_never_comes_from_a_hunk_changed_later(self):
         later = [
             {"filename": "src/a.py", "patch": LATER_HUNK},
             {"filename": "src/b.py", "patch": "@@ -9 +9 @@\n-p\n+q"},

@@ -79,5 +79,6 @@ periodically. Score `test` at each release, and add a new held-out repo when the
 
 - "Line changed after the comment" does not prove the comment caused the change. The audit measures this.
 - Controls are presumed clean. Reviewers miss bugs, so the false-alarm rate is an upper bound.
-- Controls come from files with no review threads, which tilts them toward simpler code.
+- Controls come from hunks with no nearby review thread, which tilts them toward simpler code. Thread line numbers
+  can also drift between commits, so a few controls may sit closer to a comment than intended.
 - Rebased PRs are often lost, because the commented commit is no longer an ancestor of the merged head.
