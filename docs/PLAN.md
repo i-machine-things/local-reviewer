@@ -94,7 +94,7 @@ if it beats the rules-and-retrieval pipeline from milestone 6 on `test`.
 ### 8. Feedback loop
 
 Record which findings get fixed or dismissed on real PRs and use that to promote or retire rules. Refresh the corpus
-periodically. Score `test` at each release, and add a new held-out repo when the old ones have been seen too often.
+periodically, which needs a new mining mode because the saved cursor only walks back through older PRs. Score `test` at each release, and add a new held-out repo when the old ones have been seen too often.
 
 ## Known limits of the test set
 

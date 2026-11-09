@@ -144,3 +144,14 @@ heavy a project needs:
 
 - Check the GitHub compare `status` before trusting a commit-to-head diff. After a rebase it spans the whole PR, so `LaterChanges` diffs the two file versions instead.
 - Never send a case's `truth` to a model under test, and keep the `test` split away from teacher and tuning steps.
+- Build only repos named in the config. A former holdout left in the store would otherwise land in train or dev and unseal its test cases.
+- Controls must clear a review thread's whole line span, not just its end line. Match later renames through `previous_filename`, and treat a compare listing GitHub's full 300 files as incomplete.
+- A comment with no known author can't count as human ground truth. Deleted accounts return a null author, and that includes deleted bots.
+- In `@@ -a,0 +b @@` the old side names the line before the insertion, so inserted lines sit at `a + 1`.
+
+## Deferred Review Findings (PR #1)
+
+- Not fixed, rare or low value: fixes made by deleting a file on a rebased PR, and hunks whose base later absorbed the reviewed commit. Both only lose a few cases.
+- Not fixed, covered by the planned classifier and audit: changes pushed before a comment on an older commit, and affirmative wording like "this is thread-safe".
+- Refresh mode for newer PRs is deferred to the feedback-loop milestone, because the corpus only needs backfill until then.
+- Findings on the template's own files belong upstream in `i-machine-things/.claude`, so this repo stays in step with its siblings.
