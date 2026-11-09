@@ -6,7 +6,7 @@ import time
 import urllib.parse
 
 PACE_SECONDS = 0.75  # stays under the 5000 requests/hour REST limit
-PR_PAGE_PACE_SECONDS = 15  # a page costs about 13 of the 5000 hourly GraphQL points, so this leaves room for other gh use
+PR_PAGE_PACE_SECONDS = 15  # a page costs about 13 of the 5000 hourly GraphQL points, leaving room for other gh use
 RATE_LIMIT_WAIT_SECONDS = 600
 MAX_RATE_LIMIT_WAITS = 12
 RATE_LIMITED = re.compile(r"rate limit|abuse|secondary", re.IGNORECASE)
