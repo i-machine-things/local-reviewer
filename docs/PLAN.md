@@ -58,7 +58,7 @@ the same broken down by category and language.
 Compare a bare prompt on `qwen2.5-coder:14b` and `qwen3-coder:30b`. Pick on accuracy; speed only breaks real ties.
 
 Runs on the workstation against the shared dataset. Claude's tools cannot reach the workstation directly, so runs are
-started through commands Allan issues, and results are read back from storage.
+started by hand on that machine, and results are read back from storage.
 
 ### 3. Triage and context
 

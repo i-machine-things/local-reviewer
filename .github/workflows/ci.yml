@@ -1,0 +1,124 @@
+# CI checks in this template are a starting point, not a fixed set of tools.
+# Every check here should end up either (a) tailored to fit the project's
+# actual language/stack, or (b) genuinely language-agnostic so it works
+# unmodified regardless of stack. Don't leave a Python-specific tool running
+# uselessly (or silently no-op'ing) against a non-Python repo just because it
+# was in the template — swap it for the equivalent tool in that language, or
+# drop it if there's no equivalent need. gitleaks below is deliberately in
+# the second category: secret-scanning is universal, so it stays as-is
+# everywhere. flake8/bandit are in the first category: Python-specific,
+# expected to be replaced by the downstream repo's own linter/security tool.
+name: CI
+
+on:
+  pull_request:
+    branches: [master, stable]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Secret scanning — gitleaks. Language-agnostic: keep this job as-is in
+  # every downstream repo regardless of stack.
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Runs the gitleaks CLI directly instead of gitleaks/gitleaks-action@v2:
+      # the action demands a paid GITLEAKS_LICENSE on organization-owned repos
+      # and hard-fails without one. The CLI is free (MIT) everywhere. Scans
+      # only this PR's commits, same as the action did.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -sSfLO "${base}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLO "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          sha256sum --check --ignore-missing "gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          tar -xzf "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: Scan PR commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gitleaks git --redact --verbose --log-opts="--diff-merges=first-parent ${BASE_SHA}..${HEAD_SHA}" .
+
+  # ---------------------------------------------------------------------------
+  # Lint — flake8 (errors + undefined names) and bandit (medium/high severity).
+  # Python-specific: replace both with your language's equivalent linter and
+  # security-analysis tool in a non-Python repo, don't just leave these in.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Security (Python)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install tools
+        run: pip install flake8 bandit
+
+      - name: flake8
+        run: |
+          flake8 \
+            --max-line-length=120 \
+            --select=E,F \
+            --exclude=.git,__pycache__,build_scripts \
+            .
+
+      - name: bandit
+        run: |
+          bandit -r . \
+            --exclude ./.git \
+            --severity-level medium \
+            -q
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Run tests
+        run: python -m unittest discover -v tests
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Compile and load the command line
+        run: |
+          python -m compileall -q miner
+          python -m miner --help
